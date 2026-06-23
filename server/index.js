@@ -3397,8 +3397,9 @@ async function checkTradeWatchOnce(options = {}) {
 
     if (error) throw error;
     if (!watch) return;
-    if (!botEnabled) return;
 
+    // 중요: botEnabled/관리자 잠금은 신규 신호와 마감 멘트만 막습니다.
+    // 이미 진행 중인 포지션의 2차 진입/TP/SL 감시는 01:00 이후나 잠금 상태에서도 계속 유지해야 합니다.
     const priceData = options.priceData || (await fetchXauUsdPrice());
 
     if (!options.priceData && PRICE_PROVIDER !== "vantage_mt5") {

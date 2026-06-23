@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import SetupChart from "./SetupChart.jsx";
 
-const API_BASE_URL = "https://signal-telegram-server.onrender.com";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "https://signal-telegram-server.onrender.com";
 const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || "0529";
 const AUTH_STORAGE_KEY = "signal-dashboard-auth-v1";
 const MARKET_EXIT_STORAGE_KEY = "signal-dashboard-market-exit-v1";
