@@ -3059,33 +3059,27 @@ function makeAutomaticPositionRecordText(rows, recordDate, symbol) {
   if (completedRows.length === 0) return "";
 
   const body = completedRows
-    .map((row) => {
-      const orderText =
-        row.order_text ||
-        `${orderNames[(row.signal_order || 1) - 1] || `${row.signal_order}번째`} 시그널`;
+    .map((row, index) => {
+      const firstPosition = row.positions_json.find(
+        (position) =>
+          position &&
+          position.result &&
+          String(position.result).trim() !== ""
+      );
 
-      const positionLines = row.positions_json
-        .map((position) => {
-          if (position.result === "미진입") {
-            return `${position.round} ${symbol} 미진입`;
-          }
+      if (!firstPosition) {
+        return `${index + 1}차 ${symbol} 확인중`;
+      }
 
-          if (String(position.amount || "").trim() === "") {
-            return `${position.round} ${symbol} ${position.result}`;
-          }
+      if (firstPosition.result === "미진입") {
+        return `${index + 1}차 ${symbol} 미진입`;
+      }
 
-          return `${position.round} ${symbol} ${position.result}: ${formatAutomaticMoney(
-            position.amount,
-            position.result
-          )}`;
-        })
-        .join("\n");
-
-      return `${orderText}\n${positionLines}`;
+      return `${index + 1}차 ${symbol} ${firstPosition.result}`;
     })
     .join("\n\n");
 
-  return `[${recordDate} ${symbol}] 거래 결과\n\n${body}\n\n금일 매매결과 정리본 입니다`;
+  return `[${recordDate} ${symbol}] 거래 결과\n\n${body}`;
 }
 
 async function prepareAutomaticPositionResult({
