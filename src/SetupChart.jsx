@@ -1,353 +1,143 @@
-import React, { useEffect, useMemo, useRef } from "react";
-import { createChart, CandlestickSeries, LineStyle } from "lightweight-charts";
-
-const CANDLE_INTERVAL_SECONDS = 5 * 60;
-const CANDLE_INTERVAL_MS = CANDLE_INTERVAL_SECONDS * 1000;
-const INITIAL_VISIBLE_CANDLES = 60;
-const RIGHT_PADDING_CANDLES = 5;
+import React, { useMemo } from "react";
 
 function toNumber(value) {
-  const number = Number(value);
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(String(value).replace(/,/g, ""));
   return Number.isFinite(number) ? number : null;
 }
 
-function getTickTimeMs(item) {
-  const dateText =
-    item?.checkedAt ||
-    item?.checked_at ||
-    item?.createdAt ||
-    item?.created_at ||
-    item?.timestamp ||
-    item?.time;
-
-  if (!dateText) return null;
-
-  const timestamp = new Date(dateText).getTime();
-
-  return Number.isFinite(timestamp) ? timestamp : null;
+function formatPrice(value) {
+  const number = toNumber(value);
+  if (number === null) return "-";
+  return Number.isInteger(number) ? String(number) : number.toFixed(2);
 }
 
-function makeFiveMinuteCandles(priceHistory) {
-  const candleMap = new Map();
-
-  const sortedTicks = [...(priceHistory || [])]
-    .map((item) => {
-      const price = toNumber(item.price);
-      const timestamp = getTickTimeMs(item);
-
-      if (price === null || timestamp === null) return null;
-
-      return {
-        price,
-        timestamp,
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.timestamp - b.timestamp);
-
-  sortedTicks.forEach((tick) => {
-    const bucketStartMs =
-      Math.floor(tick.timestamp / CANDLE_INTERVAL_MS) * CANDLE_INTERVAL_MS;
-
-    const time = Math.floor(bucketStartMs / 1000);
-    const price = Number(tick.price.toFixed(2));
-
-    const existing = candleMap.get(time);
-
-    if (!existing) {
-      candleMap.set(time, {
-        time,
-        open: price,
-        high: price,
-        low: price,
-        close: price,
-      });
-
-      return;
-    }
-
-    existing.high = Number(Math.max(existing.high, price).toFixed(2));
-    existing.low = Number(Math.min(existing.low, price).toFixed(2));
-    existing.close = price;
-  });
-
-  return Array.from(candleMap.values()).sort((a, b) => a.time - b.time);
-}
-
-function makeFallbackCandles(setup) {
-  const values = [
-    setup.baseEntry,
-    setup.entry2,
-    setup.entry3,
-    setup.firstTp,
-    setup.secondTp,
-    setup.thirdTp,
-    setup.slPrice,
-  ]
-    .map(toNumber)
-    .filter((value) => value !== null);
-
-  const center =
-    values.length > 0
-      ? values.reduce((sum, value) => sum + value, 0) / values.length
-      : 4500;
-
-  const now = Math.floor(Date.now() / 1000);
-  const candles = [];
-
-  for (let index = 60; index >= 1; index -= 1) {
-    const time = now - index * CANDLE_INTERVAL_SECONDS;
-    const wave = Math.sin(index / 2.5) * 6;
-    const open = center + wave;
-    const close = open + Math.cos(index / 1.7) * 3;
-    const high = Math.max(open, close) + 2;
-    const low = Math.min(open, close) - 2;
-
-    candles.push({
-      time,
-      open: Number(open.toFixed(2)),
-      high: Number(high.toFixed(2)),
-      low: Number(low.toFixed(2)),
-      close: Number(close.toFixed(2)),
-    });
-  }
-
-  return candles;
-}
-
-function applyStableVisibleRange(chart, totalCount) {
-  if (!chart || !Number.isFinite(totalCount) || totalCount <= 0) return;
-
-  chart.timeScale().setVisibleLogicalRange({
-    from: totalCount - INITIAL_VISIBLE_CANDLES,
-    to: totalCount + RIGHT_PADDING_CANDLES,
+function getTimeLabel(row) {
+  const raw = row?.checkedAt || row?.createdAt || row?.created_at || row?.time || row?.timestamp;
+  const date = raw ? new Date(raw) : null;
+  if (!date || Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("ko-KR", {
+    timeZone: "Asia/Seoul",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
   });
 }
 
-export default function SetupChart({ setup, priceHistory }) {
-  const containerRef = useRef(null);
-  const chartRef = useRef(null);
-  const candleSeriesRef = useRef(null);
-  const priceLineRefs = useRef([]);
+export default function SetupChart({ setup = {}, priceHistory = [] }) {
+  const chart = useMemo(() => {
+    const rows = Array.isArray(priceHistory)
+      ? priceHistory
+          .map((row, index) => ({
+            ...row,
+            index,
+            price: toNumber(row?.price ?? row?.bid ?? row?.ask),
+          }))
+          .filter((row) => row.price !== null)
+          .slice(-120)
+      : [];
 
-  const hasInitialDataRef = useRef(false);
-  const hasFitContentRef = useRef(false);
-  const autoFollowRef = useRef(true);
-  const isApplyingRangeRef = useRef(false);
+    const baseEntry = toNumber(setup?.baseEntry ?? setup?.base_entry ?? setup?.entry);
+    const tp = toNumber(setup?.firstTp ?? setup?.first_tp ?? setup?.tp);
+    const sl = toNumber(setup?.slPrice ?? setup?.sl_price ?? setup?.sl);
+    const lines = [
+      { key: "entry", label: "진입가", value: baseEntry, color: "#f59e0b" },
+      { key: "tp", label: "TP 익절", value: tp, color: "#16a34a" },
+      { key: "sl", label: "SL 손절", value: sl, color: "#2563eb" },
+    ].filter((line) => line.value !== null);
 
-  const previousCandleCountRef = useRef(0);
-  const previousLastTimeRef = useRef(null);
-  const previousModeRef = useRef("fallback");
-
-  const chartData = useMemo(() => {
-    const realCandles = makeFiveMinuteCandles(priceHistory);
-
-    if (realCandles.length >= 1) {
-      return {
-        mode: "real",
-        candles: realCandles,
-      };
+    const values = [...rows.map((row) => row.price), ...lines.map((line) => line.value)];
+    if (values.length === 0) {
+      values.push(0, 1);
     }
 
-    return {
-      mode: "fallback",
-      candles: makeFallbackCandles(setup || {}),
-    };
+    let min = Math.min(...values);
+    let max = Math.max(...values);
+    if (min === max) {
+      min -= 1;
+      max += 1;
+    }
+
+    const padding = Math.max((max - min) * 0.18, 1);
+    min -= padding;
+    max += padding;
+
+    return { rows, lines, min, max };
   }, [priceHistory, setup]);
 
-  useEffect(() => {
-    if (!containerRef.current) return;
+  const width = 980;
+  const height = 420;
+  const pad = { top: 28, right: 96, bottom: 46, left: 40 };
+  const innerW = width - pad.left - pad.right;
+  const innerH = height - pad.top - pad.bottom;
 
-    const chart = createChart(containerRef.current, {
-      width: containerRef.current.clientWidth,
-      height: 520,
-      layout: {
-        background: { color: "#ffffff" },
-        textColor: "#172033",
-      },
-      grid: {
-        vertLines: { color: "#edf2f7" },
-        horzLines: { color: "#edf2f7" },
-      },
-      rightPriceScale: {
-        borderColor: "#e2e8f0",
-      },
-      timeScale: {
-        borderColor: "#e2e8f0",
-        timeVisible: true,
-        secondsVisible: false,
-        rightOffset: RIGHT_PADDING_CANDLES,
-        barSpacing: 12,
-      },
-    });
+  const x = (index) => {
+    if (chart.rows.length <= 1) return pad.left + innerW / 2;
+    return pad.left + (index / (chart.rows.length - 1)) * innerW;
+  };
 
-    const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: "#16a34a",
-      downColor: "#ef4444",
-      borderUpColor: "#16a34a",
-      borderDownColor: "#ef4444",
-      wickUpColor: "#16a34a",
-      wickDownColor: "#ef4444",
-      priceFormat: {
-        type: "price",
-        precision: 2,
-        minMove: 0.01,
-      },
-    });
+  const y = (value) => pad.top + ((chart.max - value) / (chart.max - chart.min)) * innerH;
 
-    chartRef.current = chart;
-    candleSeriesRef.current = candleSeries;
+  const pathData = chart.rows
+    .map((row, index) => `${index === 0 ? "M" : "L"} ${x(index).toFixed(2)} ${y(row.price).toFixed(2)}`)
+    .join(" ");
 
-    const handleResize = () => {
-      if (!containerRef.current || !chartRef.current) return;
+  const latest = chart.rows[chart.rows.length - 1];
+  const ticks = Array.from({ length: 6 }, (_, index) => chart.min + ((chart.max - chart.min) / 5) * index).reverse();
+  const xLabels = [0, Math.floor((chart.rows.length - 1) / 2), chart.rows.length - 1]
+    .filter((value, index, array) => value >= 0 && array.indexOf(value) === index);
 
-      chartRef.current.applyOptions({
-        width: containerRef.current.clientWidth,
-      });
-    };
+  return (
+    <div style={{ width: "100%", overflowX: "auto" }}>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="XAUUSD 1차 전용 포지션 차트" style={{ width: "100%", minWidth: 760, display: "block" }}>
+        <rect x="0" y="0" width={width} height={height} rx="18" fill="#ffffff" />
+        {ticks.map((tick) => (
+          <g key={tick}>
+            <line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} stroke="#e8eef7" strokeWidth="1" />
+            <text x={width - pad.right + 10} y={y(tick) + 4} fontSize="12" fill="#334155">
+              {formatPrice(tick)}
+            </text>
+          </g>
+        ))}
 
-    const handleVisibleRangeChange = () => {
-      if (isApplyingRangeRef.current) return;
+        {chart.rows.length > 1 && <path d={pathData} fill="none" stroke="#111827" strokeWidth="2.5" />}
 
-      // 사용자가 직접 차트를 움직이거나 축소/확대하면 자동 따라가기를 멈춤
-      if (hasInitialDataRef.current) {
-        autoFollowRef.current = false;
-      }
-    };
+        {chart.rows.map((row, index) => (
+          <circle key={row.id || row.checkedAt || index} cx={x(index)} cy={y(row.price)} r={index === chart.rows.length - 1 ? 4 : 2.4} fill={index === chart.rows.length - 1 ? "#111827" : "#64748b"} />
+        ))}
 
-    window.addEventListener("resize", handleResize);
-    chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
+        {latest && (
+          <g>
+            <line x1={pad.left} x2={width - pad.right} y1={y(latest.price)} y2={y(latest.price)} stroke="#10b981" strokeWidth="1.5" strokeDasharray="4 4" />
+            <rect x={width - pad.right + 4} y={y(latest.price) - 12} width="78" height="24" rx="5" fill="#16a34a" />
+            <text x={width - pad.right + 43} y={y(latest.price) + 4} textAnchor="middle" fontSize="12" fontWeight="700" fill="#ffffff">
+              {formatPrice(latest.price)}
+            </text>
+          </g>
+        )}
 
-    return () => {
-      window.removeEventListener("resize", handleResize);
-      chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
+        {chart.lines.map((line) => (
+          <g key={line.key}>
+            <line x1={pad.left} x2={width - pad.right} y1={y(line.value)} y2={y(line.value)} stroke={line.color} strokeWidth="2" strokeDasharray="7 5" />
+            <rect x={width - pad.right - 4} y={y(line.value) - 14} width="88" height="28" rx="6" fill={line.color} />
+            <text x={width - pad.right + 40} y={y(line.value) + 4} textAnchor="middle" fontSize="12" fontWeight="800" fill="#ffffff">
+              {line.label} {formatPrice(line.value)}
+            </text>
+          </g>
+        ))}
 
-      if (chartRef.current) {
-        chartRef.current.remove();
-      }
+        {xLabels.map((index) => (
+          <text key={index} x={x(index)} y={height - 18} textAnchor="middle" fontSize="12" fill="#475569">
+            {getTimeLabel(chart.rows[index])}
+          </text>
+        ))}
 
-      chartRef.current = null;
-      candleSeriesRef.current = null;
-      priceLineRefs.current = [];
-
-      hasInitialDataRef.current = false;
-      hasFitContentRef.current = false;
-      autoFollowRef.current = true;
-      isApplyingRangeRef.current = false;
-
-      previousCandleCountRef.current = 0;
-      previousLastTimeRef.current = null;
-      previousModeRef.current = "fallback";
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!chartRef.current || !candleSeriesRef.current) return;
-
-    const candles = chartData.candles || [];
-    const mode = chartData.mode;
-
-    if (candles.length === 0) return;
-
-    const lastCandle = candles[candles.length - 1];
-    const modeChanged = previousModeRef.current !== mode;
-    const candleCountChanged =
-      previousCandleCountRef.current !== candles.length;
-    const lastTimeChanged = previousLastTimeRef.current !== lastCandle.time;
-
-    const shouldSetAllData =
-      !hasInitialDataRef.current ||
-      modeChanged ||
-      candleCountChanged ||
-      lastTimeChanged;
-
-    if (shouldSetAllData) {
-      candleSeriesRef.current.setData(candles);
-    } else {
-      candleSeriesRef.current.update(lastCandle);
-    }
-
-    hasInitialDataRef.current = true;
-    previousCandleCountRef.current = candles.length;
-    previousLastTimeRef.current = lastCandle.time;
-    previousModeRef.current = mode;
-
-    // 처음 열었을 때는 무조건 60개 봉 기준으로 보여줌
-    // 이후 사용자가 차트를 건드리지 않았으면 새 봉이 생길 때 최신 봉을 계속 따라감
-    if (!hasFitContentRef.current || autoFollowRef.current) {
-      isApplyingRangeRef.current = true;
-
-      applyStableVisibleRange(chartRef.current, candles.length);
-
-      window.setTimeout(() => {
-        isApplyingRangeRef.current = false;
-      }, 0);
-
-      hasFitContentRef.current = true;
-    }
-  }, [chartData]);
-
-  useEffect(() => {
-    if (!candleSeriesRef.current) return;
-
-    priceLineRefs.current.forEach((line) => {
-      candleSeriesRef.current.removePriceLine(line);
-    });
-
-    priceLineRefs.current = [];
-
-    const priceLines = [
-      {
-        value: setup?.slPrice,
-        title: "SL 손절",
-        color: "#2563eb",
-      },
-      {
-        value: setup?.firstTp,
-        title: "1차 TP",
-        color: "#16a34a",
-      },
-      {
-        value: setup?.secondTp,
-        title: "2차 TP",
-        color: "#16a34a",
-      },
-      {
-        value: setup?.thirdTp,
-        title: "3차 TP",
-        color: "#16a34a",
-      },
-      {
-        value: setup?.entry2,
-        title: "2차 진입",
-        color: "#facc15",
-      },
-      {
-        value: setup?.entry3,
-        title: "3차 진입",
-        color: "#ef4444",
-      },
-    ];
-
-    priceLines.forEach((line) => {
-      const price = toNumber(line.value);
-
-      if (price === null) return;
-
-      const roundedPrice = Math.round(price);
-
-      const createdLine = candleSeriesRef.current.createPriceLine({
-        price: roundedPrice,
-        color: line.color,
-        lineWidth: 2,
-        lineStyle: LineStyle.Solid,
-        axisLabelVisible: true,
-        title: line.title,
-      });
-
-      priceLineRefs.current.push(createdLine);
-    });
-  }, [setup]);
-
-  return <div className="setup-chart-box" ref={containerRef} />;
+        {chart.rows.length === 0 && (
+          <text x={width / 2} y={height / 2} textAnchor="middle" fontSize="16" fill="#64748b">
+            아직 가격 데이터가 없습니다.
+          </text>
+        )}
+      </svg>
+    </div>
+  );
 }
