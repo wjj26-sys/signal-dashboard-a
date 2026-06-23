@@ -1535,8 +1535,8 @@ const calcText = useMemo(() => {
             <div className="rule-box">
               <strong>운영 규칙</strong>
               <p>
-                24시간 구동하며 Close 시간(07:00~10:00, 22:00~23:00)에는 신규 신호만 차단됩니다.
-                진행 중 포지션의 TP/SL 감시는 Close 시간에도 계속 유지됩니다.
+                24시간 구동하며 Close 시간(07:00~09:00)에만 신규 신호가 차단됩니다.
+                그 외 시간은 자동 수신되며 진행 중 포지션의 TP/SL 감시는 Close 시간에도 계속 유지됩니다.
               </p>
             </div>
           </div>
