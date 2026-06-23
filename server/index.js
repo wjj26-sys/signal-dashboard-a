@@ -71,6 +71,10 @@ const TELEGRAM_EVENT_RETRY_TYPES = [
 ];
 const telegramEventMemory = new Map();
 
+// A방 전용 설정: 1차 진입만 사용하고, 자동 마감멘트는 보내지 않습니다.
+const SINGLE_ENTRY_MODE = true;
+const DAILY_CLOSE_NOTICE_ENABLED = false;
+
 let sentSignals = [];
 let blockedSignals = [];
 
@@ -142,30 +146,33 @@ function getAutoScheduleState() {
   const now = getKstNow();
   const hour = now.getHours();
   const minute = now.getMinutes();
-
   const minutes = hour * 60 + minute;
 
-  // 신규 신호 수신 시간(KST)
-  // 23:00 ~ 01:00만 자동 수신 가능합니다.
-  // 01:00 ~ 23:00에는 신규 신호를 자동 전송하지 않습니다.
-  // 이미 진행 중인 포지션의 2차 진입/TP/SL 감시는 이 시간표와 별개로 계속 작동합니다.
-  const openStart = 23 * 60;
-  const openEnd = 1 * 60;
+  // A방 신규 신호 수신 시간(KST)
+  // 서버는 24시간 구동하되 Close 시간에는 신규 신호만 받지 않습니다.
+  // Close 시간: 07:00~10:00, 22:00~23:00
+  // 이미 진행 중인 포지션의 TP/SL 감시는 이 시간표와 별개로 계속 작동합니다.
+  const closeRanges = [
+    { start: 7 * 60, end: 10 * 60, label: "07:00~10:00" },
+    { start: 22 * 60, end: 23 * 60, label: "22:00~23:00" },
+  ];
 
-  const isOpen = minutes >= openStart || minutes < openEnd;
+  const closeRange = closeRanges.find(
+    (range) => minutes >= range.start && minutes < range.end
+  );
 
-  if (isOpen) {
+  if (!closeRange) {
     return {
       isOpen: true,
-      statusText: "자동 운영 시간",
+      statusText: "자동 구동 시간",
       reason: "",
     };
   }
 
   return {
     isOpen: false,
-    statusText: "자동 잠금 시간",
-    reason: "자동 잠금 시간으로 미전송",
+    statusText: `Close 시간 (${closeRange.label})`,
+    reason: `Close 시간(${closeRange.label})으로 신규 신호 미전송`,
   };
 }
 
@@ -228,13 +235,13 @@ function hasTradeSetupText(message) {
 
   if (!text) return false;
 
-  const hasSymbol = /XAUUSD|GOLD/i.test(text);
-  const hasEntry1 = /1\s*차\s*진입가/i.test(text);
-  const hasEntry2 = /2\s*차\s*진입가/i.test(text);
-  const hasTp = /TP|익절가/i.test(text);
-  const hasSl = /SL|손절가/i.test(text);
+  const upperText = String(text).toUpperCase();
+  const hasDirection = /\b(BUY|SELL|LONG|SHORT)\b|롱|숏|상승|하락/i.test(upperText);
+  const hasEntry = /(?:📍\s*)?진입가\s*[:：]?\s*[-+]?\d/i.test(text);
+  const hasTp = /(?:✅\s*)?(?:TP|익절가)\s*[:：]?\s*[-+]?\d/i.test(text);
+  const hasSl = /(?:🛑\s*)?(?:SL|손절가)\s*[:：]?\s*[-+]?\d/i.test(text);
 
-  return hasSymbol && hasEntry1 && hasEntry2 && hasTp && hasSl;
+  return hasDirection && hasEntry && hasTp && hasSl;
 }
 
 function parseTelegramTradeSetup(message) {
@@ -263,12 +270,7 @@ function parseTelegramTradeSetup(message) {
 
   const baseEntry = parseSignalNumber(
     text,
-    /1\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
-  );
-
-  const entry2 = parseSignalNumber(
-    text,
-    /2\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
+    /(?:1\s*차\s*)?진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
   );
 
   const firstTp = parseSignalNumber(
@@ -284,9 +286,8 @@ function parseTelegramTradeSetup(message) {
   const missingValues = [];
 
   if (!direction) missingValues.push("방향");
-  if (baseEntry === null) missingValues.push("1차 진입가");
-  if (entry2 === null) missingValues.push("2차 진입가");
-  if (firstTp === null) missingValues.push("TP");
+  if (baseEntry === null) missingValues.push("진입가");
+  if (firstTp === null) missingValues.push("익절가");
   if (slPrice === null) missingValues.push("손절가");
 
   if (missingValues.length > 0) {
@@ -296,37 +297,21 @@ function parseTelegramTradeSetup(message) {
     };
   }
 
-  const tpGap = Math.abs(firstTp - baseEntry);
-
-  if (!Number.isFinite(tpGap) || tpGap <= 0) {
-    return {
-      ok: false,
-      error: "자동 추출 실패: TP 간격이 올바르지 않습니다.",
-    };
-  }
-
   const isLong = direction === "LONG";
 
   const validPriceOrder = isLong
-    ? entry2 <= baseEntry && firstTp > baseEntry && slPrice < entry2
-    : entry2 >= baseEntry && firstTp < baseEntry && slPrice > entry2;
+    ? firstTp > baseEntry && slPrice < baseEntry
+    : firstTp < baseEntry && slPrice > baseEntry;
 
   if (!validPriceOrder) {
     return {
       ok: false,
       error:
-        "자동 추출 실패: 방향과 진입가·TP·손절가의 가격 순서가 맞지 않습니다.",
+        "자동 추출 실패: 방향과 진입가·익절가·손절가의 가격 순서가 맞지 않습니다.",
     };
   }
 
-  const sign = isLong ? 1 : -1;
-
-  // 새 비중: 1차 2랏 + 2차 1랏
-  const secondAverage = (baseEntry * 2 + entry2) / 3;
-  const secondTp = roundAutoTpPrice(
-    direction,
-    secondAverage + sign * tpGap
-  );
+  const tpGap = Math.abs(firstTp - baseEntry);
 
   return {
     ok: true,
@@ -335,11 +320,11 @@ function parseTelegramTradeSetup(message) {
       symbol: "XAUUSD",
       direction,
       baseEntry,
-      entry2,
+      entry2: null,
       tpGap,
       firstTp,
-      secondAverage,
-      secondTp,
+      secondAverage: null,
+      secondTp: null,
       slPrice,
     },
   };
@@ -1657,6 +1642,7 @@ function isDailyCloseNoticeTime() {
 }
 
 async function checkDailyCloseNoticeOnce(options = {}) {
+  if (!DAILY_CLOSE_NOTICE_ENABLED) return false;
   if (dailyCloseNoticeCheckInProgress) return false;
 
   // 관리자가 잠금을 눌러둔 상태에서는 휴장일/비상상황으로 보고
@@ -1741,6 +1727,7 @@ async function checkDailyCloseNoticeOnce(options = {}) {
 async function tryDailyCloseNoticeAfterPositionFinish(
   tradeDate = ""
 ) {
+  if (!DAILY_CLOSE_NOTICE_ENABLED) return;
   try {
     await checkDailyCloseNoticeOnce({ tradeDate });
   } catch (error) {
@@ -2024,9 +2011,7 @@ async function handleSignalMessage(message) {
       console.log("텔레그램 계산값 자동 저장 완료:", {
         direction: autoResult.setup.direction,
         baseEntry: autoResult.setup.base_entry,
-        entry2: autoResult.setup.entry2,
         firstTp: autoResult.setup.first_tp,
-        secondTp: autoResult.setup.second_tp,
         slPrice: autoResult.setup.sl_price,
       });
 
@@ -2098,17 +2083,17 @@ async function saveAutomaticTradeSetup(setup) {
         symbol: setup.symbol || "XAUUSD",
         direction: setup.direction || "LONG",
         base_entry: toNullableNumber(setup.baseEntry),
-        entry2: toNullableNumber(setup.entry2),
+        entry2: SINGLE_ENTRY_MODE ? null : toNullableNumber(setup.entry2),
 
-        // 기존 Supabase 컬럼은 그대로 두되 3차 로직에는 사용하지 않습니다.
-        entry3: toNullableNumber(setup.entry2),
+        // A방은 1차 전용입니다. 기존 Supabase 컬럼 호환을 위해 2차/3차 컬럼은 null로 둡니다.
+        entry3: null,
 
         tp_gap: toNullableNumber(setup.tpGap),
         first_tp: toNullableNumber(setup.firstTp),
-        second_average: toNullableNumber(setup.secondAverage),
-        second_tp: toNullableNumber(setup.secondTp),
-        third_average: toNullableNumber(setup.secondAverage),
-        third_tp: toNullableNumber(setup.secondTp),
+        second_average: null,
+        second_tp: null,
+        third_average: null,
+        third_tp: null,
         sl_price: toNullableNumber(setup.slPrice),
       },
       {
@@ -2126,19 +2111,13 @@ async function saveAutomaticTradeSetup(setup) {
 async function startAutomaticTradeWatch(setupRow) {
   const db = requireSupabase();
 
-  const entry2 = toWatchNumber(setupRow.entry2);
+  const baseEntry = toWatchNumber(setupRow.base_entry);
   const firstTp = toWatchNumber(setupRow.first_tp);
-  const secondTp = toWatchNumber(setupRow.second_tp);
   const slPrice = toWatchNumber(setupRow.sl_price);
 
-  if (
-    entry2 === null ||
-    firstTp === null ||
-    secondTp === null ||
-    slPrice === null
-  ) {
+  if (baseEntry === null || firstTp === null || slPrice === null) {
     throw new Error(
-      "자동 감시 시작 실패: 진입가·TP·손절가 중 비어 있는 값이 있습니다."
+      "자동 감시 시작 실패: 진입가·익절가·손절가 중 비어 있는 값이 있습니다."
     );
   }
 
@@ -2150,14 +2129,14 @@ async function startAutomaticTradeWatch(setupRow) {
         is_active: true,
         symbol: setupRow.symbol || "XAUUSD",
         direction: setupRow.direction || "LONG",
-        entry2,
+        entry2: baseEntry,
 
-        // 기존 DB 컬럼 호환용 값이며 실제 3차 진입은 처리하지 않습니다.
-        entry3: entry2,
+        // A방은 1차 전용입니다. 기존 DB 컬럼 호환용으로만 값을 남깁니다.
+        entry3: baseEntry,
 
         first_tp: firstTp,
-        second_tp: secondTp,
-        third_tp: secondTp,
+        second_tp: firstTp,
+        third_tp: firstTp,
         sl_price: slPrice,
         active_tp: firstTp,
         sent_entry2: false,
@@ -2236,17 +2215,17 @@ app.post("/api/trade-setup", async (req, res) => {
           symbol: payload.symbol || "XAUUSD",
           direction: payload.direction || "LONG",
           base_entry: toNullableNumber(payload.baseEntry),
-          entry2: toNullableNumber(payload.entry2),
+          entry2: SINGLE_ENTRY_MODE ? null : toNullableNumber(payload.entry2),
 
-          // 기존 Supabase 컬럼 호환용 값
-          entry3: toNullableNumber(payload.entry2),
+          // A방은 1차 전용입니다. 기존 Supabase 컬럼 호환을 위해 2차/3차 컬럼은 null로 둡니다.
+          entry3: null,
 
           tp_gap: toNullableNumber(payload.tpGap),
           first_tp: toNullableNumber(payload.firstTp),
-          second_average: toNullableNumber(payload.secondAverage),
-          second_tp: toNullableNumber(payload.secondTp),
-          third_average: toNullableNumber(payload.secondAverage),
-          third_tp: toNullableNumber(payload.secondTp),
+          second_average: null,
+          second_tp: null,
+          third_average: null,
+          third_tp: null,
           sl_price: toNullableNumber(payload.slPrice),
         },
         {
@@ -2795,20 +2774,14 @@ app.post("/api/trade-watch/start", async (req, res) => {
       });
     }
 
-    const entry2 = toWatchNumber(setup.entry2);
+    const baseEntry = toWatchNumber(setup.base_entry);
     const firstTp = toWatchNumber(setup.first_tp);
-    const secondTp = toWatchNumber(setup.second_tp);
     const slPrice = toWatchNumber(setup.sl_price);
 
-    if (
-      entry2 === null ||
-      firstTp === null ||
-      secondTp === null ||
-      slPrice === null
-    ) {
+    if (baseEntry === null || firstTp === null || slPrice === null) {
       return res.status(400).json({
         ok: false,
-        error: "2차 진입가와 1·2차 TP, SL 손절가가 필요합니다.",
+        error: "진입가와 익절가, SL 손절가가 필요합니다.",
       });
     }
 
@@ -2820,14 +2793,14 @@ app.post("/api/trade-watch/start", async (req, res) => {
           is_active: true,
           symbol: setup.symbol || "XAUUSD",
           direction: setup.direction || "LONG",
-          entry2,
+          entry2: baseEntry,
 
-          // 기존 DB 컬럼 호환용 값
-          entry3: entry2,
+          // A방은 1차 전용입니다. 기존 DB 컬럼 호환용 값입니다.
+          entry3: baseEntry,
 
           first_tp: firstTp,
-          second_tp: secondTp,
-          third_tp: secondTp,
+          second_tp: firstTp,
+          third_tp: firstTp,
           sl_price: slPrice,
           active_tp: firstTp,
           sent_entry2: false,
@@ -2960,21 +2933,16 @@ function getTradeDateForWatch(watch) {
 }
 
 function getConfirmedWatchStage(watch) {
-  if (watch?.sent_entry2) return 2;
+  // A방은 1차 전용입니다.
   return 1;
 }
 
 function getTpForWatchStage({ stage, firstTp, secondTp }) {
-  if (stage === 2) {
-    return secondTp ?? firstTp;
-  }
-
   return firstTp;
 }
 
 const AUTO_POSITION_LOTS = {
-  1: 2,
-  2: 1,
+  1: 1,
 };
 
 const XAUUSD_VALUE_PER_LOT = 100;
@@ -3038,12 +3006,6 @@ function buildAutomaticPositionResults({
       roundText: "1차",
       entryPrice: setup?.base_entry,
       lot: AUTO_POSITION_LOTS[1],
-    },
-    {
-      round: 2,
-      roundText: "2차",
-      entryPrice: setup?.entry2,
-      lot: AUTO_POSITION_LOTS[2],
     },
   ];
 
@@ -3423,9 +3385,9 @@ async function checkTradeWatchOnce(options = {}) {
 
     /*
       중요 처리 순서
-      1. SL은 어떤 회차에서도 최우선으로 1회만 처리
-      2. 1차 상태에서는 2차 진입만 처리하고 즉시 종료
-      3. TP는 DB에 확정된 마지막 진입 회차의 TP만 사용
+      1. SL은 최우선으로 1회만 처리
+      2. A방은 1차 전용이므로 2차 진입 알림은 사용하지 않음
+      3. TP는 1차 익절가만 사용
     */
 
     if (
@@ -3479,58 +3441,7 @@ async function checkTradeWatchOnce(options = {}) {
 
     const stage = getConfirmedWatchStage(watch);
 
-    // 1차 상태에서는 2차 진입만 처리합니다.
-    if (
-      stage === 1 &&
-      hasTouchedEntry(direction, price, entry2)
-    ) {
-      const nextTp = secondTp ?? firstTp;
-
-      const entry2EventKey =
-        `${getTradeWatchEventPrefix(watch)}:ENTRY2`;
-
-      const entry2SendResult = await sendTelegramEventToTargets({
-        eventKey: entry2EventKey,
-        tradeDate: getTradeDateForWatch(watch),
-        eventType: "ENTRY2",
-        signalLogId: activeSignal?.id || null,
-        method: "sendMessage",
-        body: {
-          text: makeEntryReachMessage({
-            direction,
-            round: 2,
-            entry: entry2,
-            tp: nextTp,
-            sl: slPrice,
-          }),
-        },
-        requirePrimarySent: false,
-      });
-
-      if (entry2SendResult.hasNeedsCheck) {
-        console.error(
-          `2차 진입 메시지 일부 전달방 전송 여부 확인 필요: ${entry2EventKey}`
-        );
-      }
-
-      const claimedEntry2 = await claimTradeWatchEvent(db, {
-        flagColumn: "sent_entry2",
-        updates: {
-          active_tp: nextTp,
-          last_price: price,
-          last_checked_at: new Date().toISOString(),
-        },
-        requiredValues: {
-          sent_entry3: false,
-          sent_tp: false,
-          sent_sl: false,
-        },
-      });
-
-      if (!claimedEntry2) return;
-
-      return;
-    }
+    // A방은 1차 전용이므로 2차 진입 도달 메시지는 보내지 않습니다.
 
     // TP는 active_tp 값을 맹신하지 않고, DB에 확정된 진입 회차로 다시 계산합니다.
     const confirmedTp = getTpForWatchStage({
@@ -3544,18 +3455,11 @@ async function checkTradeWatchOnce(options = {}) {
       !watch.sent_sl &&
       hasTouchedTp(direction, price, confirmedTp)
     ) {
-      const stageRequirements =
-        stage === 2
-          ? {
-              sent_entry2: true,
-              sent_entry3: false,
-              sent_sl: false,
-            }
-          : {
-              sent_entry2: false,
-              sent_entry3: false,
-              sent_sl: false,
-            };
+      const stageRequirements = {
+        sent_entry2: false,
+        sent_entry3: false,
+        sent_sl: false,
+      };
 
       const tpEventKey =
         `${getTradeWatchEventPrefix(watch)}:TP`;
@@ -4494,14 +4398,14 @@ setInterval(() => {
   });
 }, 15 * 1000);
 
-// 새벽 1시 이후 포지션이 없으면 바로, 진행 중이면 종료 직후 마감 안내를 보냅니다.
+// A방은 24시간 구동이므로 자동 마감 안내는 비활성화되어 있습니다.
 setInterval(() => {
   checkDailyCloseNoticeOnce().catch((error) => {
     console.error("금일 마감 안내 확인 실패:", error.message);
   });
 }, 10 * 1000);
 
-// 서버가 새벽 잠금 시간에 재시작되어도 미전송된 마감 안내를 확인합니다.
+// 자동 마감 안내 비활성화 상태 확인용 no-op입니다.
 setTimeout(() => {
   checkDailyCloseNoticeOnce().catch((error) => {
     console.error("서버 시작 후 마감 안내 확인 실패:", error.message);

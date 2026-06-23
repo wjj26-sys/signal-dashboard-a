@@ -79,17 +79,11 @@ function getStoredMarketExitInfo() {
 }
 
 function makePositionDraft() {
-  return [
-    { round: "1차", result: "수익 🟢", amount: "" },
-    { round: "2차", result: "미진입", amount: "" },
-  ];
+  return [{ round: "1차", result: "수익 🟢", amount: "" }];
 }
 
 function makeDefaultPositions() {
-  return [
-    { round: "1차", result: "진행중", amount: "" },
-    { round: "2차", result: "미진입", amount: "" },
-  ];
+  return [{ round: "1차", result: "진행중", amount: "" }];
 }
 
 function normalizeServerSignal(item) {
@@ -100,7 +94,7 @@ function normalizeServerSignal(item) {
   const savedPositions =
     Array.isArray(item.positions) && item.positions.length > 0
       ? item.positions.filter(
-          (position) => !String(position.round || "").includes("3")
+          (position) => String(position.round || "").includes("1")
         )
       : makeDefaultPositions();
 
@@ -167,46 +161,23 @@ function roundTpPrice(direction, value) {
 
 function calculateTp({ direction, baseEntry, entry2, tpGap }) {
   const base = Number(baseEntry);
-  const e2 = Number(entry2);
-  const gap = Number(tpGap);
-
-  const normalizedDirection = String(direction || "").toUpperCase();
-
-  const sign =
-    normalizedDirection === "SHORT" || normalizedDirection === "SELL"
-      ? -1
-      : 1;
-
-  // 1차 TP = 1차 진입가 ± TP 간격
-  const rawFirstTp =
-    Number.isFinite(base) && Number.isFinite(gap)
-      ? base + sign * gap
-      : null;
-
-  // 2차 평균가 = 1차 2랏 + 2차 1랏
-  const secondAverage =
-    Number.isFinite(base) && Number.isFinite(e2)
-      ? (base * 2 + e2) / 3
-      : null;
-
-  // 2차 TP = 2차 평균가 ± TP 간격
-  const rawSecondTp =
-    secondAverage !== null && Number.isFinite(gap)
-      ? secondAverage + sign * gap
-      : null;
+  const targetTp = Number(tpGap);
 
   return {
-    firstTp: roundTpPrice(direction, rawFirstTp),
-    secondAverage,
-    secondTp: roundTpPrice(direction, rawSecondTp),
+    firstTp: Number.isFinite(targetTp) ? Math.round(targetTp) : null,
+    secondAverage: null,
+    secondTp: null,
+    tpGap:
+      Number.isFinite(base) && Number.isFinite(targetTp)
+        ? Math.abs(targetTp - base)
+        : null,
   };
 }
 
 const XAUUSD_VALUE_PER_LOT = 100;
 
 const POSITION_LOTS = {
-  1: 2,
-  2: 1,
+  1: 1,
 };
 
 function toProfitNumber(value) {
@@ -242,17 +213,11 @@ function calculateSinglePositionProfit({ direction, entryPrice, exitPrice, lot }
 }
 
 function getTpByRound(setup, round) {
-  if (Number(round) === 1) return setup?.firstTp;
-  if (Number(round) === 2) return setup?.secondTp || setup?.firstTp;
-
   return setup?.firstTp;
 }
 
 function getEntryByRound(setup, round) {
-  if (Number(round) === 1) return setup?.baseEntry;
-  if (Number(round) === 2) return setup?.entry2;
-
-  return null;
+  return setup?.baseEntry;
 }
 
 function getRoundNumberFromText(roundText) {
@@ -274,12 +239,6 @@ function buildAutoPositionDraft({
       roundText: "1차",
       entryPrice: setup?.baseEntry,
       lot: POSITION_LOTS[1],
-    },
-    {
-      round: 2,
-      roundText: "2차",
-      entryPrice: setup?.entry2,
-      lot: POSITION_LOTS[2],
     },
   ];
 
@@ -402,9 +361,9 @@ export default function App() {
   const [tradeDate, setTradeDate] = useState(getTodayText());
   const [tradeSymbol, setTradeSymbol] = useState("XAUUSD");
   const [direction, setDirection] = useState("LONG");
-  const [tpGap, setTpGap] = useState("10");
+  const [tpGap, setTpGap] = useState("4005");
   const [baseEntry, setBaseEntry] = useState("4000");
-  const [entry2, setEntry2] = useState("3990");
+  const [entry2, setEntry2] = useState("");
 
   const [selectedSignalId, setSelectedSignalId] = useState("");
   const [positionDraft, setPositionDraft] = useState(() => makePositionDraft());
@@ -461,11 +420,11 @@ export default function App() {
       symbol: tradeSymbol,
       direction,
       baseEntry,
-      entry2,
-      tpGap,
+      entry2: null,
+      tpGap: calc.tpGap,
       firstTp: calc.firstTp,
-      secondAverage: calc.secondAverage,
-      secondTp: calc.secondTp,
+      secondAverage: null,
+      secondTp: null,
       slPrice,
     }),
     [
@@ -492,9 +451,12 @@ export default function App() {
 const calcText = useMemo(() => {
   const directionText = direction === "LONG" ? "롱" : "숏";
 
-  return `[${tradeSymbol} ${directionText} TP 계산]
-2차 TP: ${formatNumber(calc.secondTp)}`;
-}, [tradeSymbol, direction, calc]);
+  return `[${tradeSymbol} ${directionText} 감시값]
+진입가: ${formatNumber(baseEntry)}
+익절가: ${formatNumber(calc.firstTp)}
+손절가: ${formatNumber(slPrice)}`;
+}, [tradeSymbol, direction, baseEntry, calc, slPrice]);
+
 
   const fetchServerStatus = async () => {
     try {
@@ -523,8 +485,8 @@ const calcText = useMemo(() => {
       if (setup.direction) setDirection(setup.direction);
 
       setBaseEntry(setup.baseEntry === null ? "" : String(setup.baseEntry));
-      setEntry2(setup.entry2 === null ? "" : String(setup.entry2));
-      setTpGap(setup.tpGap === null ? "" : String(setup.tpGap));
+      setEntry2("");
+      setTpGap(setup.firstTp === null ? "" : String(setup.firstTp));
       setSlPrice(setup.slPrice === null ? "" : String(setup.slPrice));
     } catch (error) {
       console.error("계산값 불러오기 실패:", error);
@@ -1510,7 +1472,7 @@ const calcText = useMemo(() => {
 
               <div>
                 <span>운영 상태</span>
-                <strong>{serverStatus?.operatingTime ? "상시 운영" : "운영 외"}</strong>
+                <strong>{serverStatus?.operatingTime ? "수신 가능" : "Close 시간"}</strong>
               </div>
 
               <div>
@@ -1573,8 +1535,8 @@ const calcText = useMemo(() => {
             <div className="rule-box">
               <strong>운영 규칙</strong>
               <p>
-                봇은 기본적으로 ON 상태입니다. 잠금 시 봇이 OFF되고, 화면 일부 조작이 제한됩니다.
-                잠금 해제 시 자동으로 전달 가능 상태가 됩니다.
+                24시간 구동하며 Close 시간(07:00~10:00, 22:00~23:00)에는 신규 신호만 차단됩니다.
+                진행 중 포지션의 TP/SL 감시는 Close 시간에도 계속 유지됩니다.
               </p>
             </div>
           </div>
@@ -1619,7 +1581,7 @@ const calcText = useMemo(() => {
             {isUiLocked && <div className="lock-overlay">잠금중</div>}
 
             <div className="table-header">
-              <div className="section-title">진입가 계산기</div>
+              <div className="section-title">1차 전용 감시값</div>
 
               <div className="record-actions">
                 <button
@@ -1697,7 +1659,7 @@ const calcText = useMemo(() => {
               </div>
 
               <div className="form-field">
-                <label>TP 간격</label>
+                <label>익절가</label>
                 <input
                   type="number"
                   value={tpGap}
@@ -1708,20 +1670,11 @@ const calcText = useMemo(() => {
 
             <div className="form-grid">
               <div className="form-field">
-                <label>1차 진입가 / 2랏</label>
+                <label>진입가</label>
                 <input
                   type="number"
                   value={baseEntry}
                   onChange={(e) => setBaseEntry(e.target.value)}
-                />
-              </div>
-
-              <div className="form-field">
-                <label>2차 진입가 / 1랏</label>
-                <input
-                  type="number"
-                  value={entry2}
-                  onChange={(e) => setEntry2(e.target.value)}
                 />
               </div>
             </div>
@@ -1738,19 +1691,18 @@ const calcText = useMemo(() => {
 
             <div className="calc-result-grid two">
               <div className="calc-box">
-                <p>1차 TP</p>
+                <p>익절가</p>
                 <strong>{formatNumber(calc.firstTp)}</strong>
               </div>
 
               <div className="calc-box">
-                <p>2차 TP</p>
-                <strong>{formatNumber(calc.secondTp)}</strong>
+                <p>손절가</p>
+                <strong>{formatNumber(slPrice)}</strong>
               </div>
             </div>
 
             <p className="muted-note">
-              계산식: 1차 TP는 1차 진입가에 TP 간격을 적용하고, 2차 TP는
-              1차 2랏과 2차 1랏의 가중평균가에 TP 간격을 적용합니다.
+              A방은 1차 전용입니다. 진입가, 익절가, 손절가만 저장하고 TP/SL 감시를 진행합니다.
             </p>
           </div>
 
@@ -1760,8 +1712,7 @@ const calcText = useMemo(() => {
             <div className="section-title">포지션 선택 패널</div>
 
             <p className="muted-note">
-              시그널마다 1차에서 끝날 수도, 2차까지 갈 수도 있어서 결과는
-              여기서 직접 선택합니다.
+              A방은 1차 전용입니다. 결과는 1차 기준으로만 선택합니다.
             </p>
 
             <div className="form-field position-select">
@@ -1997,7 +1948,6 @@ const calcText = useMemo(() => {
             <div className="chart-legend">
               <span className="legend-item sl">파랑: SL 손절</span>
               <span className="legend-item tp">초록: TP 익절</span>
-              <span className="legend-item entry2">노랑: 2차 진입</span>
             </div>
 
             <SetupChart
