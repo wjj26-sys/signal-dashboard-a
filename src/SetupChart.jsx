@@ -3,8 +3,12 @@ import { createChart, CandlestickSeries, LineStyle } from "lightweight-charts";
 
 const CANDLE_INTERVAL_SECONDS = 5 * 60;
 const CANDLE_INTERVAL_MS = CANDLE_INTERVAL_SECONDS * 1000;
-const INITIAL_VISIBLE_CANDLES = 60;
-const RIGHT_PADDING_CANDLES = 5;
+
+const INITIAL_VISIBLE_CANDLES = 3;
+const RIGHT_PADDING_CANDLES = 1;
+
+const CHART_TICK_STORAGE_KEY = "a-dashboard-xauusd-chart-live-ticks";
+const CHART_TICK_MAX_AGE_MS = 30 * 60 * 1000;
 
 function toNumber(value) {
   if (value === null || value === undefined || value === "") return null;
@@ -26,6 +30,36 @@ function getTickTimeMs(item) {
 
   const timestamp = new Date(dateText).getTime();
   return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function loadStoredLiveTicks() {
+  try {
+    const raw = window.localStorage.getItem(CHART_TICK_STORAGE_KEY);
+    if (!raw) return [];
+
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    const now = Date.now();
+
+    return parsed.filter((item) => {
+      const timestamp = getTickTimeMs(item);
+      return timestamp && now - timestamp <= CHART_TICK_MAX_AGE_MS;
+    });
+  } catch {
+    return [];
+  }
+}
+
+function saveStoredLiveTicks(ticks) {
+  try {
+    window.localStorage.setItem(
+      CHART_TICK_STORAGE_KEY,
+      JSON.stringify(ticks.slice(-600))
+    );
+  } catch {
+    // localStorage 저장 실패는 차트 동작에 영향 없게 무시
+  }
 }
 
 function makeFiveMinuteCandles(priceHistory) {
@@ -92,7 +126,7 @@ function applyStableVisibleRange(chart, totalCount) {
   });
 }
 
-export default function SetupChart({ setup, priceHistory, currentPrice }) {
+export default function SetupChart({ setup = {}, priceHistory = [], currentPrice = null }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const candleSeriesRef = useRef(null);
@@ -107,12 +141,18 @@ export default function SetupChart({ setup, priceHistory, currentPrice }) {
   const previousLastTimeRef = useRef(null);
 
   const lastLivePriceRef = useRef(null);
-  const [liveTicks, setLiveTicks] = useState([]);
+  const [liveTicks, setLiveTicks] = useState(() => loadStoredLiveTicks());
+
+  useEffect(() => {
+    saveStoredLiveTicks(liveTicks);
+  }, [liveTicks]);
 
   useEffect(() => {
     const price = toNumber(currentPrice);
     if (price === null) return;
 
+    // 같은 가격이 계속 들어오면 불필요하게 중복 저장하지 않음
+    // 가격이 바뀌면 마지막 5분봉의 close/high/low가 실시간으로 움직임
     if (lastLivePriceRef.current === price && liveTicks.length > 0) return;
 
     lastLivePriceRef.current = price;
@@ -134,12 +174,29 @@ export default function SetupChart({ setup, priceHistory, currentPrice }) {
 
   const chartData = useMemo(() => {
     const mergedTicks = [...(priceHistory || []), ...liveTicks];
-    const realCandles = makeFiveMinuteCandles(mergedTicks);
+
+    let realCandles = makeFiveMinuteCandles(mergedTicks);
+
+    const latestPrice = toNumber(currentPrice);
+
+    // 현재가와 너무 동떨어진 예전 더미/오염 가격대가 섞이면 제거
+    if (latestPrice !== null && realCandles.length > 0) {
+      const tolerance = Math.max(Math.abs(latestPrice) * 0.06, 120);
+
+      realCandles = realCandles.filter((candle) => {
+        return (
+          Math.abs(candle.open - latestPrice) <= tolerance ||
+          Math.abs(candle.high - latestPrice) <= tolerance ||
+          Math.abs(candle.low - latestPrice) <= tolerance ||
+          Math.abs(candle.close - latestPrice) <= tolerance
+        );
+      });
+    }
 
     return {
       candles: realCandles,
     };
-  }, [priceHistory, liveTicks]);
+  }, [priceHistory, liveTicks, currentPrice]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -163,7 +220,10 @@ export default function SetupChart({ setup, priceHistory, currentPrice }) {
         timeVisible: true,
         secondsVisible: false,
         rightOffset: RIGHT_PADDING_CANDLES,
-        barSpacing: 12,
+        barSpacing: 48,
+      },
+      crosshair: {
+        mode: 1,
       },
     });
 
@@ -195,6 +255,7 @@ export default function SetupChart({ setup, priceHistory, currentPrice }) {
     const handleVisibleRangeChange = () => {
       if (isApplyingRangeRef.current) return;
 
+      // 사용자가 직접 차트를 움직이거나 축소/확대하면 자동 따라가기 멈춤
       if (hasInitialDataRef.current) {
         autoFollowRef.current = false;
       }
