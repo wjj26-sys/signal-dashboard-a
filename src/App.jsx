@@ -1953,6 +1953,7 @@ const calcText = useMemo(() => {
             <SetupChart
               setup={savedTradeSetup || currentTradeSetup}
               priceHistory={priceHistory}
+              currentPrice={latestXauusdPrice}
             />
           </div>
         </div>
