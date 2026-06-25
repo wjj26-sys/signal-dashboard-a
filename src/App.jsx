@@ -275,25 +275,27 @@ function makePositionText(signals, tradeDate, tradeSymbol) {
     return "";
   }
 
+  // A방은 1차 전용이라, 기록기에서는 "첫번째 시그널" 같은 소제목을 빼고
+  // 저장된 시그널 순서대로 1차 / 2차 / 3차 ... 형태로 한 줄씩 정리합니다.
   const body = signals
-    .map((item) => {
-      const positionLines = item.positions
-        .map((position) => {
-          if (position.result === "미진입") {
-            return `${position.round} ${tradeSymbol} 미진입`;
-          }
+    .map((item, index) => {
+      const position = Array.isArray(item.positions) && item.positions.length > 0
+        ? item.positions[0]
+        : { result: "확인중", amount: "" };
 
-          if (position.amount.trim() === "") {
-            return `${position.round} ${tradeSymbol} ${position.result}`;
-          }
+      const roundText = `${index + 1}차`;
+      const result = position.result || "확인중";
+      const amount = String(position.amount || "").trim();
 
-          return `${position.round} ${tradeSymbol} ${
-            position.result
-          }: ${formatMoney(position.amount, position.result)}`;
-        })
-        .join("\n");
+      if (result === "미진입") {
+        return `${roundText} ${tradeSymbol} 미진입`;
+      }
 
-      return `${item.order}\n${positionLines}`;
+      if (amount === "") {
+        return `${roundText} ${tradeSymbol} ${result}`;
+      }
+
+      return `${roundText} ${tradeSymbol} ${result}: ${formatMoney(amount, result)}`;
     })
     .join("\n\n");
 
@@ -1535,8 +1537,8 @@ const calcText = useMemo(() => {
             <div className="rule-box">
               <strong>운영 규칙</strong>
               <p>
-                24시간 구동하며 Close 시간(07:00~09:00)에만 신규 신호가 차단됩니다.
-                그 외 시간은 자동 수신되며 진행 중 포지션의 TP/SL 감시는 Close 시간에도 계속 유지됩니다.
+                24시간 구동하며 Close 시간(07:00~10:00, 22:00~23:00)에는 신규 신호만 차단됩니다.
+                진행 중 포지션의 TP/SL 감시는 Close 시간에도 계속 유지됩니다.
               </p>
             </div>
           </div>
@@ -1953,7 +1955,6 @@ const calcText = useMemo(() => {
             <SetupChart
               setup={savedTradeSetup || currentTradeSetup}
               priceHistory={priceHistory}
-              currentPrice={latestXauusdPrice}
             />
           </div>
         </div>
