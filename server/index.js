@@ -150,10 +150,11 @@ function getAutoScheduleState() {
 
   // A방 신규 신호 수신 시간(KST)
   // 서버는 24시간 구동하되 Close 시간에는 신규 신호만 받지 않습니다.
-  // Close 시간: 07:00~09:00
+  // Close 시간: 07:00~10:00, 22:00~23:00
   // 이미 진행 중인 포지션의 TP/SL 감시는 이 시간표와 별개로 계속 작동합니다.
   const closeRanges = [
-    { start: 7 * 60, end: 9 * 60, label: "07:00~09:00" },
+    { start: 7 * 60, end: 10 * 60, label: "07:00~10:00" },
+    { start: 22 * 60, end: 23 * 60, label: "22:00~23:00" },
   ];
 
   const closeRange = closeRanges.find(
@@ -1747,6 +1748,21 @@ const VANTAGE_MAX_STALE_SECONDS = Math.max(
   Number(process.env.VANTAGE_MAX_STALE_SECONDS || 60)
 );
 
+// MT5 가격은 0.5초 단위로 빠르게 들어올 수 있으므로,
+// 매매일지/미전송 기록은 보존하고 가격 tick 기록만 최근 1시간 기준으로 정리합니다.
+const PRICE_TICK_RETENTION_MINUTES = Math.max(
+  10,
+  Number(process.env.PRICE_TICK_RETENTION_MINUTES || 60)
+);
+
+const PRICE_TICK_CLEANUP_INTERVAL_MINUTES = Math.max(
+  1,
+  Number(process.env.PRICE_TICK_CLEANUP_INTERVAL_MINUTES || 5)
+);
+
+let lastPriceTickCleanupAt = 0;
+let isPriceTickCleanupRunning = false;
+
 let isCheckingTradeWatch = false;
 
 function formatTvValue(value) {
@@ -2417,6 +2433,54 @@ function mapPriceTick(row) {
   };
 }
 
+async function cleanupOldXauUsdPriceTicks({ force = false } = {}) {
+  const now = Date.now();
+  const cleanupIntervalMs = PRICE_TICK_CLEANUP_INTERVAL_MINUTES * 60 * 1000;
+
+  // 500ms마다 들어오는 가격 tick마다 삭제 쿼리를 실행하지 않도록 주기를 제한합니다.
+  if (!force && now - lastPriceTickCleanupAt < cleanupIntervalMs) return;
+  if (isPriceTickCleanupRunning) return;
+
+  isPriceTickCleanupRunning = true;
+  lastPriceTickCleanupAt = now;
+
+  try {
+    const db = requireSupabase();
+    const cutoff = new Date(
+      now - PRICE_TICK_RETENTION_MINUTES * 60 * 1000
+    ).toISOString();
+
+    // 가격 수신이 잠시 끊겨도 화면/감시에 쓸 마지막 가격 1개는 남깁니다.
+    const { data: latestTick, error: latestError } = await db
+      .from("xauusd_price_ticks")
+      .select("id")
+      .eq("symbol", "XAUUSD")
+      .order("checked_at", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latestError) throw latestError;
+
+    let deleteQuery = db
+      .from("xauusd_price_ticks")
+      .delete()
+      .eq("symbol", "XAUUSD")
+      .lt("checked_at", cutoff);
+
+    if (latestTick?.id !== undefined && latestTick?.id !== null) {
+      deleteQuery = deleteQuery.neq("id", latestTick.id);
+    }
+
+    const { error: deleteError } = await deleteQuery;
+    if (deleteError) throw deleteError;
+  } catch (error) {
+    console.error("가격 tick 기록 자동 정리 실패:", error.message);
+  } finally {
+    isPriceTickCleanupRunning = false;
+  }
+}
+
 async function saveXauUsdPriceTick(priceData, source = "manual") {
   try {
     const db = requireSupabase();
@@ -2437,12 +2501,9 @@ async function saveXauUsdPriceTick(priceData, source = "manual") {
 
     if (error) throw error;
 
-    const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
-
-    await db
-      .from("xauusd_price_ticks")
-      .delete()
-      .lt("created_at", cutoff);
+    cleanupOldXauUsdPriceTicks().catch((cleanupError) => {
+      console.error("가격 tick 기록 자동 정리 예약 실패:", cleanupError.message);
+    });
 
     return data;
   } catch (error) {
@@ -2669,6 +2730,10 @@ app.post("/api/vantage-tick", async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    cleanupOldXauUsdPriceTicks().catch((cleanupError) => {
+      console.error("가격 tick 기록 자동 정리 예약 실패:", cleanupError.message);
+    });
 
     const mappedTick = mapPriceTick(data);
 
@@ -3059,27 +3124,33 @@ function makeAutomaticPositionRecordText(rows, recordDate, symbol) {
   if (completedRows.length === 0) return "";
 
   const body = completedRows
-    .map((row, index) => {
-      const firstPosition = row.positions_json.find(
-        (position) =>
-          position &&
-          position.result &&
-          String(position.result).trim() !== ""
-      );
+    .map((row) => {
+      const orderText =
+        row.order_text ||
+        `${orderNames[(row.signal_order || 1) - 1] || `${row.signal_order}번째`} 시그널`;
 
-      if (!firstPosition) {
-        return `${index + 1}차 ${symbol} 확인중`;
-      }
+      const positionLines = row.positions_json
+        .map((position) => {
+          if (position.result === "미진입") {
+            return `${position.round} ${symbol} 미진입`;
+          }
 
-      if (firstPosition.result === "미진입") {
-        return `${index + 1}차 ${symbol} 미진입`;
-      }
+          if (String(position.amount || "").trim() === "") {
+            return `${position.round} ${symbol} ${position.result}`;
+          }
 
-      return `${index + 1}차 ${symbol} ${firstPosition.result}`;
+          return `${position.round} ${symbol} ${position.result}: ${formatAutomaticMoney(
+            position.amount,
+            position.result
+          )}`;
+        })
+        .join("\n");
+
+      return `${orderText}\n${positionLines}`;
     })
     .join("\n\n");
 
-  return `[${recordDate} ${symbol}] 거래 결과\n\n${body}`;
+  return `[${recordDate} ${symbol}] 거래 결과\n\n${body}\n\n금일 매매결과 정리본 입니다`;
 }
 
 async function prepareAutomaticPositionResult({
