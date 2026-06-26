@@ -285,17 +285,11 @@ function makePositionText(signals, tradeDate, tradeSymbol) {
 
       const roundText = `${index + 1}차`;
       const result = position.result || "확인중";
-      const amount = String(position.amount || "").trim();
-
       if (result === "미진입") {
         return `${roundText} ${tradeSymbol} 미진입`;
       }
 
-      if (amount === "") {
-        return `${roundText} ${tradeSymbol} ${result}`;
-      }
-
-      return `${roundText} ${tradeSymbol} ${result}: ${formatMoney(amount, result)}`;
+      return `${roundText} ${tradeSymbol} ${result}`;
     })
     .join("\n\n");
 
